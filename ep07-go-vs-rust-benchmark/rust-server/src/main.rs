@@ -12,7 +12,7 @@ use std::{
     fs,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::Instant,
@@ -56,7 +56,7 @@ static GLOBAL: TrackingAllocator = TrackingAllocator;
 
 /// Zero-copy deserialization of incoming prompt payload.
 /// When ALLOC_PRESSURE=false (Rust B), the &'a str borrows directly from the contiguous
-/// Bytes buffer, requiring zero string copying.
+/// Bytes buffer, requiring zero string copying when the payload has no escaped characters.
 #[derive(Deserialize)]
 struct TokenizeRequest<'a> {
     #[serde(borrow)]
@@ -75,10 +75,12 @@ struct MetricsResponse {
     // GC Metrics (always 0 in Rust)
     gc_cycles: u32,
     gc_pause_total_ns: u64,
+    gc_pause_max_ms: f64,
 
-    // Empirical Allocator Metrics (Replacing Hypotheses with Direct Measurement)
+    // Empirical Allocator Metrics (Direct Measurement)
     alloc_count: u64,
     dealloc_count: u64,
+    alloc_calls_per_req: f64,
     total_allocated_bytes: u64,
     current_heap_bytes: u64,
 
@@ -121,7 +123,6 @@ async fn handle_tokenize(
     State(state): State<Arc<AppState>>,
     body: Bytes,
 ) -> Result<Json<TokenizeResponse>, (StatusCode, String)> {
-    // 1. Deserialization
     let req: TokenizeRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON payload: {}", e)))?;
 
@@ -135,38 +136,25 @@ async fn handle_tokenize(
     let token_count: usize;
 
     if state.alloc_pressure {
-        // =====================================================================
         // Rust A: Allocation-Heavy Mode
-        // Forces intermediate string cloning and dynamic vector reallocations
-        // to isolate language syntax vs memory allocation discipline.
-        // =====================================================================
         let owned_text: String = req.text.to_string(); // Heap allocation 1
 
         let tokens = state.bpe.encode_ordinary(&owned_text); // Heap allocation 2
         token_count = tokens.len();
 
-        // Intermediate vector slicing / chunk allocations
         let mut chunks: Vec<Vec<usize>> = Vec::with_capacity(tokens.len() / 128 + 1);
         for chunk in tokens.chunks(128) {
             chunks.push(chunk.to_vec()); // Multiple heap allocations
         }
 
-        // Substring cloning
         if owned_text.len() > 64 {
             let prefix = owned_text[..64].to_string(); // Heap allocation
             let _ = prefix;
         }
-
-        // chunks and owned_text dropped here via RAII
     } else {
-        // =====================================================================
         // Rust B: Zero-Copy Mode
-        // Zero string heap copies. Tokens vector is frame-scoped and dropped
-        // immediately, proving minimal allocator overhead and zero GC pauses.
-        // =====================================================================
         let tokens = state.bpe.encode_ordinary(req.text);
         token_count = tokens.len();
-        // tokens vector dropped immediately here via RAII
     }
 
     state.request_counter.fetch_add(1, Ordering::Relaxed);
@@ -185,6 +173,13 @@ async fn handle_metrics(State(state): State<Arc<AppState>>) -> Json<MetricsRespo
         0
     };
 
+    let reqs = state.request_counter.load(Ordering::Relaxed);
+    let calls_per_req = if reqs > 0 {
+        alloc_c as f64 / reqs as f64
+    } else {
+        0.0
+    };
+
     let strategy_label = if state.alloc_pressure {
         "Rust A (Allocation-Heavy / Cloned Churn)".to_string()
     } else {
@@ -194,14 +189,16 @@ async fn handle_metrics(State(state): State<Arc<AppState>>) -> Json<MetricsRespo
     Json(MetricsResponse {
         gc_cycles: 0,
         gc_pause_total_ns: 0,
+        gc_pause_max_ms: 0.0,
         alloc_count: alloc_c,
         dealloc_count: dealloc_c,
+        alloc_calls_per_req: calls_per_req,
         total_allocated_bytes: alloc_b,
         current_heap_bytes: current_heap,
         peak_rss_mb: read_rss_mb(),
         alloc_pressure: state.alloc_pressure,
         strategy: strategy_label,
-        total_requests: state.request_counter.load(Ordering::Relaxed),
+        total_requests: reqs,
         uptime_seconds: state.start_time.elapsed().as_secs_f64(),
     })
 }
@@ -235,7 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let alloc_pressure = match std::env::var("ALLOC_PRESSURE") {
         Ok(val) => val.to_lowercase() == "true" || val == "1",
-        Err(_) => false, // Default to Rust B (Zero-copy)
+        Err(_) => false,
     };
 
     let strategy_label = if alloc_pressure {

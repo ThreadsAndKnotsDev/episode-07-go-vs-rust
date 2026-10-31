@@ -1,154 +1,73 @@
 version: '3.8'
 
 services:
-  # ============================================================================
-  # 2x2 BENCHMARK MATRIX SERVICES (2 Cores, 1 GB RAM Hardware Isolation)
-  # ============================================================================
-
-  # Go A: Allocation-Heavy (Dynamic slice headers, window chunking, string clones)
-  go-server-a:
-    build:
-      context: ./go-server
-      dockerfile: Dockerfile
-    container_name: benchmark-go-server-a
-    ports:
-      - "8080:8080"
-    environment:
-      - PORT=8080
-      - ALLOC_PRESSURE=true
-      - GOGC=100
-      - GOMAXPROCS=2
-      - TIKTOKEN_CACHE_DIR=/root/.cache/tiktoken
-    cpus: 2.0
-    cpuset: "0,1"
-    mem_limit: 1024m
-    memswap_limit: 1024m
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 1024M
-        reservations:
-          cpus: '2.0'
-          memory: 1024M
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 2s
-      timeout: 2s
-      retries: 10
-      start_period: 3s
-
-  # Go B: Optimized (Buffer reuse via sync.Pool, zero-copy window avoidance)
-  go-server-b:
-    build:
-      context: ./go-server
-      dockerfile: Dockerfile
-    container_name: benchmark-go-server-b
-    ports:
-      - "8080:8080"
-    environment:
-      - PORT=8080
-      - ALLOC_PRESSURE=false
-      - GOGC=100
-      - GOMAXPROCS=2
-      - TIKTOKEN_CACHE_DIR=/root/.cache/tiktoken
-    cpus: 2.0
-    cpuset: "0,1"
-    mem_limit: 1024m
-    memswap_limit: 1024m
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 1024M
-        reservations:
-          cpus: '2.0'
-          memory: 1024M
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 2s
-      timeout: 2s
-      retries: 10
-      start_period: 3s
-
-  # Rust A: Allocation-Heavy (Cloned Strings, vector reallocation, chunk allocations)
-  rust-server-a:
-    build:
-      context: ./rust-server
-      dockerfile: Dockerfile
-    container_name: benchmark-rust-server-a
-    ports:
-      - "8081:8081"
-    environment:
-      - PORT=8081
-      - ALLOC_PRESSURE=true
-      - RUST_LOG=info
-      - TOKIO_WORKER_THREADS=2
-    cpus: 2.0
-    cpuset: "0,1"
-    mem_limit: 1024m
-    memswap_limit: 1024m
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 1024M
-        reservations:
-          cpus: '2.0'
-          memory: 1024M
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
-      interval: 2s
-      timeout: 2s
-      retries: 10
-      start_period: 3s
-
-  # Rust B: Zero-Copy (Borrowed &'a str, stack-scoped RAII drop, minimal allocator churn)
-  rust-server-b:
-    build:
-      context: ./rust-server
-      dockerfile: Dockerfile
-    container_name: benchmark-rust-server-b
-    ports:
-      - "8081:8081"
-    environment:
-      - PORT=8081
-      - ALLOC_PRESSURE=false
-      - RUST_LOG=info
-      - TOKIO_WORKER_THREADS=2
-    cpus: 2.0
-    cpuset: "0,1"
-    mem_limit: 1024m
-    memswap_limit: 1024m
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 1024M
-        reservations:
-          cpus: '2.0'
-          memory: 1024M
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
-      interval: 2s
-      timeout: 2s
-      retries: 10
-      start_period: 3s
-
-  # Backward compatibility aliases
   go-server:
-    extends:
-      service: go-server-a
+    build:
+      context: ./go-server
+      dockerfile: Dockerfile
+    container_name: benchmark-go-server
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - ALLOC_PRESSURE=true
+      - GOGC=100
+      - GOMAXPROCS=2
+      - TIKTOKEN_CACHE_DIR=/root/.cache/tiktoken
+    # Hardware isolation: pinned to 2 CPU cores and 1 GB RAM
+    cpus: 2.0
+    cpuset: "0,1"
+    mem_limit: 1024m
+    memswap_limit: 1024m
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1024M
+        reservations:
+          cpus: '2.0'
+          memory: 1024M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 3s
 
   rust-server:
-    extends:
-      service: rust-server-b
+    build:
+      context: ./rust-server
+      dockerfile: Dockerfile
+    container_name: benchmark-rust-server
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - RUST_LOG=info
+      - TOKIO_WORKER_THREADS=2
+    # Hardware isolation: pinned to identical 2 CPU cores and 1 GB RAM
+    cpus: 2.0
+    cpuset: "0,1"
+    mem_limit: 1024m
+    memswap_limit: 1024m
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1024M
+        reservations:
+          cpus: '2.0'
+          memory: 1024M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 3s
 
-  # k6 container runner for environments without native k6 binary
+  # Optional k6 container runner for environments without native k6 binary
   k6:
     image: grafana/k6:latest
     container_name: benchmark-k6-runner
@@ -159,3 +78,4 @@ services:
     environment:
       - TARGET_URL=http://localhost:8080/tokenize
     entrypoint: ["k6"]
+

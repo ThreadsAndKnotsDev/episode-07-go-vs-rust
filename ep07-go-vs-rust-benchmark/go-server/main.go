@@ -35,15 +35,20 @@ type TokenizeResponse struct {
 // MetricsResponse holds operational telemetry exposed to benchmark runners.
 type MetricsResponse struct {
 	// Standard GC Metrics
-	GCCycles        uint32  `json:"gc_cycles"`
-	HeapAllocBytes  uint64  `json:"heap_alloc_bytes"`
-	TotalAllocBytes uint64  `json:"total_alloc_bytes"`
-	HeapSysBytes    uint64  `json:"heap_sys_bytes"`
-	GCPauseTotalNs  uint64  `json:"gc_pause_total_ns"`
-	GCCPUFraction   float64 `json:"gc_cpu_fraction"`
-	Goroutines      int     `json:"goroutines"`
-	PeakRSSMB       float64 `json:"peak_rss_mb"`
-	AllocPressure   bool    `json:"alloc_pressure"`
+	GCCycles       uint32  `json:"gc_cycles"`
+	HeapAllocBytes uint64  `json:"heap_alloc_bytes"`
+	HeapSysBytes   uint64  `json:"heap_sys_bytes"`
+	GCPauseTotalNs uint64  `json:"gc_pause_total_ns"`
+	GCPauseMaxMs   float64 `json:"gc_pause_max_ms"`
+	GCCPUFraction  float64 `json:"gc_cpu_fraction"`
+	Goroutines     int     `json:"goroutines"`
+	PeakRSSMB      float64 `json:"peak_rss_mb"`
+	AllocPressure  bool    `json:"alloc_pressure"`
+
+	// Granular Heap Object Allocation Telemetry
+	AllocCount       uint64  `json:"alloc_count"`
+	TotalAllocBytes  uint64  `json:"total_alloc_bytes"`
+	AllocCallsPerReq float64 `json:"alloc_calls_per_req"`
 
 	// Granular Go Runtime Instrumentation (Proving the Causal Chain)
 	GCMarkAssistCPUSeconds float64 `json:"gc_mark_assist_cpu_seconds"`
@@ -190,7 +195,7 @@ func handleTokenize(w http.ResponseWriter, r *http.Request) {
 	// Go A (ALLOC_PRESSURE=true): Allocation-heavy. Dynamic slice buffers,
 	// window chunk copies, and substring headers. Under 10k RPS burst, the high
 	// allocation rate triggers the GC pacer and conscripts worker goroutines
-	// into GC Mark Assist.
+	// into GC Mark Assist mid-request.
 	//
 	// Go B (ALLOC_PRESSURE=false): Optimized, low-allocation. Reusable token
 	// slice buffer from sync.Pool without intermediate chunk cloning.
@@ -259,12 +264,31 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	toks := totalTokens
 	metricsMutex.RUnlock()
 
+	var maxPauseNs uint64
+	numPauses := int(m.NumGC)
+	if numPauses > 256 {
+		numPauses = 256
+	}
+	for i := 0; i < numPauses; i++ {
+		if m.PauseNs[i] > maxPauseNs {
+			maxPauseNs = m.PauseNs[i]
+		}
+	}
+
+	callsPerReq := 0.0
+	if reqs > 0 {
+		callsPerReq = float64(m.Mallocs) / float64(reqs)
+	}
+
 	resp := MetricsResponse{
 		GCCycles:               m.NumGC,
 		HeapAllocBytes:         m.HeapAlloc,
 		TotalAllocBytes:        m.TotalAlloc,
+		AllocCount:             m.Mallocs,
+		AllocCallsPerReq:       callsPerReq,
 		HeapSysBytes:           m.HeapSys,
 		GCPauseTotalNs:         m.PauseTotalNs,
+		GCPauseMaxMs:           float64(maxPauseNs) / 1e6,
 		GCCPUFraction:          m.GCCPUFraction,
 		Goroutines:             runtime.NumGoroutine(),
 		PeakRSSMB:              readRSSMB(m.Sys),
