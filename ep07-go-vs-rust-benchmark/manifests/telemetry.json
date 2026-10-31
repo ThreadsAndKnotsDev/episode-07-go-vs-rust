@@ -1,0 +1,22 @@
+{
+  "benchmark": "BPE Tokenization (cl100k_base)",
+  "concurrency": "10k RPS Burst",
+  "go": {
+    "p50_us": 320.0,
+    "p95_us": 1450.0,
+    "p99_us": 6820.0,
+    "p99_9_ms": 13.85,
+    "max_latency_ms": 28.4,
+    "peak_rss_mb": 184.5,
+    "gc_cycles": 142
+  },
+  "rust": {
+    "p50_us": 62.0,
+    "p95_us": 115.0,
+    "p99_us": 240.0,
+    "p99_9_ms": 0.48,
+    "max_latency_ms": 1.15,
+    "peak_rss_mb": 34.2,
+    "gc_cycles": 0
+  }
+}
