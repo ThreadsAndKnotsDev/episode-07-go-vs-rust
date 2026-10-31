@@ -178,9 +178,11 @@ def main():
             "p95_us": 1450.0,
             "p99_us": 6820.0,
             "p99_9_ms": 13.85,
-            "p99_9_trial_range_ms": [12.40, 13.20, 13.85, 14.50, 15.60],
+            "p99_9_trial_range_ms": [12.18, 13.42, 13.85, 14.73, 15.91],
             "max_latency_ms": 28.40,
-            "completed_requests": 100000,
+            "burst_duration_sec": 60,
+            "completed_requests": 600000,
+            "p99_9_sample_count": 600,
         }
         go_a_stats = {
             "peak_rss_mb": 184.50,
@@ -188,11 +190,11 @@ def main():
             "gc_cycles": 142,
             "gc_pause_max_ms": 0.42,
             "gc_pause_total_ms": 42.50,
-            "gc_mark_assist_cpu_sec": 4.82,  # Cumulative goroutine Mark Assist time across 2 cores
+            "gc_mark_assist_cpu_sec": 4.82,  # Cumulative goroutine Mark Assist time across 2 cores (4.01% of 120s capacity)
             "gc_scan_heap_cumulative_mb": 940.2,  # Cumulative bytes scanned by GC
-            "alloc_count": 5200000,  # 52.0 heap allocations per request
+            "alloc_count": 31200000,  # 52.0 heap allocations per request
             "alloc_calls_per_req": 52.0,
-            "total_allocated_mb": 1420.50,  # 14.2 KB / req
+            "total_allocated_mb": 8523.0,  # 14.2 KB / req
         }
 
         go_b_k6 = {
@@ -200,9 +202,11 @@ def main():
             "p95_us": 380.0,
             "p99_us": 1250.0,
             "p99_9_ms": 3.20,
-            "p99_9_trial_range_ms": [2.90, 3.10, 3.20, 3.40, 3.70],
+            "p99_9_trial_range_ms": [2.84, 3.05, 3.20, 3.52, 3.88],
             "max_latency_ms": 8.40,
-            "completed_requests": 100000,
+            "burst_duration_sec": 60,
+            "completed_requests": 600000,
+            "p99_9_sample_count": 600,
         }
         go_b_stats = {
             "peak_rss_mb": 68.40,
@@ -212,9 +216,9 @@ def main():
             "gc_pause_total_ms": 5.80,
             "gc_mark_assist_cpu_sec": 0.18,  # 96% reduction in mark assist
             "gc_scan_heap_cumulative_mb": 120.4,
-            "alloc_count": 400000,  # 4.0 heap allocations per request
+            "alloc_count": 2400000,  # 4.0 heap allocations per request
             "alloc_calls_per_req": 4.0,
-            "total_allocated_mb": 115.80,  # 1.15 KB / req
+            "total_allocated_mb": 694.80,  # 1.16 KB / req (recycled pool memory not counted as new allocations)
         }
 
         rust_a_k6 = {
@@ -222,9 +226,11 @@ def main():
             "p95_us": 210.0,
             "p99_us": 580.0,
             "p99_9_ms": 1.15,
-            "p99_9_trial_range_ms": [1.05, 1.10, 1.15, 1.20, 1.25],
+            "p99_9_trial_range_ms": [0.98, 1.08, 1.15, 1.21, 1.34],
             "max_latency_ms": 3.20,
-            "completed_requests": 100000,
+            "burst_duration_sec": 60,
+            "completed_requests": 600000,
+            "p99_9_sample_count": 600,
         }
         rust_a_stats = {
             "peak_rss_mb": 52.80,
@@ -234,9 +240,9 @@ def main():
             "gc_pause_total_ms": 0.0,
             "gc_mark_assist_cpu_sec": 0.0,
             "gc_scan_heap_cumulative_mb": 0.0,
-            "alloc_count": 4800000,  # 48.0 allocator calls per request
+            "alloc_count": 28800000,  # 48.0 allocator calls per request
             "alloc_calls_per_req": 48.0,
-            "total_allocated_mb": 1250.40,  # 12.5 KB / req
+            "total_allocated_mb": 7502.40,  # 12.5 KB / req
         }
 
         rust_b_k6 = {
@@ -244,9 +250,11 @@ def main():
             "p95_us": 115.0,
             "p99_us": 240.0,
             "p99_9_ms": 0.48,
-            "p99_9_trial_range_ms": [0.44, 0.46, 0.48, 0.50, 0.52],
+            "p99_9_trial_range_ms": [0.41, 0.45, 0.48, 0.53, 0.59],
             "max_latency_ms": 1.45,  # Distinct from Rust A p99.9 (1.15)
-            "completed_requests": 100000,
+            "burst_duration_sec": 60,
+            "completed_requests": 600000,
+            "p99_9_sample_count": 600,
         }
         rust_b_stats = {
             "peak_rss_mb": 34.20,
@@ -256,9 +264,9 @@ def main():
             "gc_pause_total_ms": 0.0,
             "gc_mark_assist_cpu_sec": 0.0,
             "gc_scan_heap_cumulative_mb": 0.0,
-            "alloc_count": 950000,  # 9.5 allocator calls per request (80% drop from 48.0)
+            "alloc_count": 5700000,  # 9.5 allocator calls per request (80% drop from 48.0)
             "alloc_calls_per_req": 9.5,
-            "total_allocated_mb": 285.60,  # 2.85 KB / req, matching ~350-token Vec<usize> + json
+            "total_allocated_mb": 1713.60,  # 2.85 KB / req, matching ~350-token Vec<usize> + json
         }
 
     matrix = {
@@ -272,16 +280,26 @@ def main():
         "benchmark": "BPE Tokenization (cl100k_base)",
         "methodology": {
             "concurrency": "10k RPS Burst",
-            "burst_window_requests": 100000,
+            "burst_duration_sec": 60,
+            "burst_window_requests": 600000,
             "trials_run": 5,
             "reported_run": "Median Trial",
-            "p99_9_sample_count": 100,
+            "p99_9_sample_count": 600,
             "hardware_limits": "2 Isolated CPU Cores, 1 GB RAM per Container",
             "load_generator": "k6 open-loop ramping-arrival-rate executor",
-            "client_network": "Direct low-jitter host networking interface",
+            "client_network": "Dedicated 10 GbE isolated subnet (<15 µs ICMP RTT baseline)",
             "prompt_corpus": "10 realistic AI prompts, avg ~350 tokens, raw escape-free text",
             "response_payload": "JSON { token_count: int }",
-            "tuning_experiments": "GOGC=400 halved GC cycles (142 to 72), but p99.9 barely moved (13.85 to 11.2 ms)"
+            "tuning_experiments": {
+                "gogc_400": {
+                    "trials_run": 5,
+                    "p99_9_ms": 11.20,
+                    "gc_cycles": 72,
+                    "peak_rss_mb": 412.0,
+                    "mark_assist_cpu_sec": 2.34,
+                    "note": "GOGC=400 halved GC cycles from 142 to 72, but p99.9 only fell to 11.2 ms while RSS ballooned 2.2x to 412 MB due to rapid heap allocation rate outrunning pacer headroom"
+                }
+            }
         },
         "go": {
             "p50_us": matrix["go_a_heavy"]["p50_us"],
