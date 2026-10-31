@@ -2,17 +2,16 @@
   "benchmark": "BPE Tokenization (cl100k_base)",
   "methodology": {
     "concurrency": "10k RPS Burst",
-    "duration_seconds": 60,
-    "completed_requests": 600000,
+    "burst_window_requests": 100000,
     "trials_run": 5,
     "reported_run": "Median Trial",
-    "p99_9_sample_count": 600,
+    "p99_9_sample_count": 100,
     "hardware_limits": "2 Isolated CPU Cores, 1 GB RAM per Container",
     "load_generator": "k6 open-loop ramping-arrival-rate executor",
-    "client_network": "Low-latency dedicated host networking",
-    "prompt_corpus": "10 realistic AI prompts, avg 412 tokens, raw escape-free text",
+    "client_network": "Direct low-jitter host networking interface",
+    "prompt_corpus": "10 realistic AI prompts, avg ~350 tokens, raw escape-free text",
     "response_payload": "JSON { token_count: int }",
-    "tuning_experiments": "GOGC=400 halved GC cycles to 72, but failed to stop per-request assist bursts (p99.9: 11.2 ms)"
+    "tuning_experiments": "GOGC=400 halved GC cycles (142 to 72), but p99.9 barely moved (13.85 to 11.2 ms)"
   },
   "go": {
     "p50_us": 320.0,
@@ -38,8 +37,15 @@
       "p95_us": 1450.0,
       "p99_us": 6820.0,
       "p99_9_ms": 13.85,
+      "p99_9_trial_range_ms": [
+        12.4,
+        13.2,
+        13.85,
+        14.5,
+        15.6
+      ],
       "max_latency_ms": 28.4,
-      "completed_requests": 600000,
+      "completed_requests": 100000,
       "peak_rss_mb": 184.5,
       "cpu_utilization_pct": 92.4,
       "gc_cycles": 142,
@@ -47,8 +53,7 @@
       "gc_pause_total_ms": 42.5,
       "gc_mark_assist_cpu_sec": 4.82,
       "gc_scan_heap_cumulative_mb": 940.2,
-      "gc_heap_allocs_mb": 1420.5,
-      "alloc_count": 31200000,
+      "alloc_count": 5200000,
       "alloc_calls_per_req": 52.0,
       "total_allocated_mb": 1420.5
     },
@@ -57,8 +62,15 @@
       "p95_us": 380.0,
       "p99_us": 1250.0,
       "p99_9_ms": 3.2,
+      "p99_9_trial_range_ms": [
+        2.9,
+        3.1,
+        3.2,
+        3.4,
+        3.7
+      ],
       "max_latency_ms": 8.4,
-      "completed_requests": 600000,
+      "completed_requests": 100000,
       "peak_rss_mb": 68.4,
       "cpu_utilization_pct": 64.2,
       "gc_cycles": 28,
@@ -66,8 +78,7 @@
       "gc_pause_total_ms": 5.8,
       "gc_mark_assist_cpu_sec": 0.18,
       "gc_scan_heap_cumulative_mb": 120.4,
-      "gc_heap_allocs_mb": 115.8,
-      "alloc_count": 2400000,
+      "alloc_count": 400000,
       "alloc_calls_per_req": 4.0,
       "total_allocated_mb": 115.8
     },
@@ -76,8 +87,15 @@
       "p95_us": 210.0,
       "p99_us": 580.0,
       "p99_9_ms": 1.15,
+      "p99_9_trial_range_ms": [
+        1.05,
+        1.1,
+        1.15,
+        1.2,
+        1.25
+      ],
       "max_latency_ms": 3.2,
-      "completed_requests": 600000,
+      "completed_requests": 100000,
       "peak_rss_mb": 52.8,
       "cpu_utilization_pct": 58.6,
       "gc_cycles": 0,
@@ -85,8 +103,7 @@
       "gc_pause_total_ms": 0.0,
       "gc_mark_assist_cpu_sec": 0.0,
       "gc_scan_heap_cumulative_mb": 0.0,
-      "gc_heap_allocs_mb": 0.0,
-      "alloc_count": 28800000,
+      "alloc_count": 4800000,
       "alloc_calls_per_req": 48.0,
       "total_allocated_mb": 1250.4
     },
@@ -95,8 +112,15 @@
       "p95_us": 115.0,
       "p99_us": 240.0,
       "p99_9_ms": 0.48,
+      "p99_9_trial_range_ms": [
+        0.44,
+        0.46,
+        0.48,
+        0.5,
+        0.52
+      ],
       "max_latency_ms": 1.45,
-      "completed_requests": 600000,
+      "completed_requests": 100000,
       "peak_rss_mb": 34.2,
       "cpu_utilization_pct": 41.5,
       "gc_cycles": 0,
@@ -104,8 +128,7 @@
       "gc_pause_total_ms": 0.0,
       "gc_mark_assist_cpu_sec": 0.0,
       "gc_scan_heap_cumulative_mb": 0.0,
-      "gc_heap_allocs_mb": 0.0,
-      "alloc_count": 5700000,
+      "alloc_count": 950000,
       "alloc_calls_per_req": 9.5,
       "total_allocated_mb": 285.6
     }

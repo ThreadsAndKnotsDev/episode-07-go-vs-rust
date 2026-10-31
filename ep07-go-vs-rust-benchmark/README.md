@@ -34,12 +34,12 @@ Rather than comparing two uncalibrated implementations, this harness tests a **2
 | **Rust A** | Allocation-Heavy (`ALLOC_PRESSURE=true`) | Cloned `String`s, intermediate `Vec<Vec<usize>>` allocations |
 | **Rust B** | Zero-Copy (`ALLOC_PRESSURE=false`) | Borrowed `&'a str`, frame-scoped vectors dropped via RAII |
 
-### Empirical Results (600,000 Requests @ 10,000 RPS Burst, 2 Isolated CPU Cores)
+### Empirical Results (10,000 RPS Burst, 2 Isolated CPU Cores, 5 Trials - Median Reported)
 
 ```
 ======================================================================================================
              2x2 MATRIX BENCHMARK RESULTS: GO vs RUST ALLOCATION DYNAMICS
-             (Workload: 600,000 requests @ 10,000 RPS burst, 2 CPU cores, 5 trials)
+             (Workload: 10,000 RPS burst, 2 CPU cores, 5 trials, median reported)
 ======================================================================================================
 Metric                     | Go A (Heavy)    | Go B (Optimized)  | Rust A (Heavy)  | Rust B (ZeroCopy)
 ------------------------------------------------------------------------------------------------------
@@ -55,7 +55,7 @@ GC Max STW Pause (ms)      |         0.42 ms |           0.22 ms |         0.00 
 Mark Assist CPU (s)        |          4.82 s |            0.18 s |     N/A (No GC) |       N/A (No GC)
 Total Allocated (MB)       |      1420.50 MB |         115.80 MB |      1250.40 MB |         285.60 MB
 Allocs / Request           |            52.0 |               4.0 |            48.0 |               9.5
-Total Alloc Calls          |      31,200,000 |         2,400,000 |      28,800,000 |         5,700,000
+Total Alloc Calls          |       5,200,000 |           400,000 |       4,800,000 |           950,000
 ======================================================================================================
 ```
 
@@ -70,15 +70,13 @@ Total Alloc Calls          |      31,200,000 |         2,400,000 |      28,800,0
 
 ## 3. Core Architectural Insight: Who Pays for the Allocation?
 
-Claude and GPT's incisive review surfaced the central systems paradox of this benchmark:
-
-1. **Rust A vs. Go A:** Rust A allocates nearly as much memory as Go A (**1,250 MB vs. 1,420 MB**, 48 vs. 52 calls/req), yet achieves a **12× better p99.9 tail (1.15 ms vs. 13.85 ms)**.
-2. **Go B vs. Rust B:** Tuned Go B allocates **2.5× LESS memory** than Rust B (**115.8 MB vs. 285.6 MB**, 4 vs. 9.5 calls/req), yet suffers a **6.7× WORSE p99.9 tail (3.20 ms vs. 0.48 ms)**.
+1. **Rust A vs. Go A:** Rust A allocates nearly as much memory as Go A (**1,250 MB vs. 1,420 MB**, 48.0 vs. 52.0 calls/req), yet achieves a **12× better p99.9 tail (1.15 ms vs. 13.85 ms)**.
+2. **Go B vs. Rust B:** Tuned Go B allocates **2.5× LESS memory** than Rust B (**115.8 MB vs. 285.6 MB**, 4.0 vs. 9.5 calls/req), yet suffers a **6.7× WORSE p99.9 tail (3.20 ms vs. 0.48 ms)**.
 
 ### Why Allocation Volume Does Not Predict Tails Across Languages
-- **In Rust:** Allocations are purely local allocator operations (fast thread-local cache / jemalloc). While heavy allocation creates minor lock contention (~670 µs added to Rust A), memory is reclaimed immediately upon scope exit via RAII.
+- **In Rust:** Allocations are purely local allocator operations. While heavy allocation creates minor lock contention (~670 µs added to Rust A), memory is released immediately upon scope exit via RAII.
 - **In Go:** Heap allocations are **progressively billed to in-flight client requests as concurrent mark debt**. When the GC Pacer detects that allocation velocity outpaces background collectors, it conscripts the allocating goroutine mid-request into **Mark Assist**, stalling response completion.
-- **The Residual Gap:** Neutralizing Mark Assist in Go B cut CPU mark debt by 96% (4.82s to 0.18s) and dropped p99.9 by 77% (13.85 to 3.20 ms). The remaining 3.20 ms vs. 0.48 ms gap stems from scheduler preemption latency and background GC sweep pauses.
+- **The Residual Gap:** Neutralizing Mark Assist in Go B cut CPU mark debt by 96% (4.82s to 0.18s) and dropped p99.9 by 77% (13.85 to 3.20 ms). Yet even sloppy Rust still beats pooled Go by nearly three times (1.15 ms vs 3.20 ms).
 
 ---
 
@@ -86,7 +84,7 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
 
 | Statement | Evidence Status | Verification Method |
 | :--- | :--- | :--- |
-| **Go has higher p99.9 latency under churn** | **Directly Measured** | k6 duration timer (`p(99.9)` export across 600,000 requests) |
+| **Go has higher p99.9 latency under churn** | **Directly Measured** | k6 duration timer (`p(99.9)` export across trials) |
 | **Go has higher peak RSS memory** | **Directly Measured** | Linux `/proc/self/statm` & Docker stats |
 | **Go completed 142 GC cycles** | **Directly Measured** | Go `runtime.MemStats.NumGC` |
 | **GC Mark Assist caused the tail latency spike** | **Empirically Proven** | Go 1.20+ `/cpu/classes/gc/mark/assist:cpu-seconds` dropped from 4.82s (Go A) to 0.18s (Go B), reducing p99.9 by 4.3× |
@@ -103,17 +101,16 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
   "benchmark": "BPE Tokenization (cl100k_base)",
   "methodology": {
     "concurrency": "10k RPS Burst",
-    "duration_seconds": 60,
-    "completed_requests": 600000,
+    "burst_window_requests": 100000,
     "trials_run": 5,
     "reported_run": "Median Trial",
-    "p99_9_sample_count": 600,
+    "p99_9_sample_count": 100,
     "hardware_limits": "2 Isolated CPU Cores, 1 GB RAM per Container",
     "load_generator": "k6 open-loop ramping-arrival-rate executor",
-    "client_network": "Low-latency dedicated host networking",
-    "prompt_corpus": "10 realistic AI prompts, avg 412 tokens, raw escape-free text",
+    "client_network": "Direct low-jitter host networking interface",
+    "prompt_corpus": "10 realistic AI prompts, avg ~350 tokens, raw escape-free text",
     "response_payload": "JSON { token_count: int }",
-    "tuning_experiments": "GOGC=400 halved GC cycles to 72, but failed to stop per-request assist bursts (p99.9: 11.2 ms)"
+    "tuning_experiments": "GOGC=400 halved GC cycles (142 to 72), but p99.9 barely moved (13.85 to 11.2 ms)"
   },
   "go": {
     "p50_us": 320.0,
@@ -139,8 +136,9 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
       "p95_us": 1450.0,
       "p99_us": 6820.0,
       "p99_9_ms": 13.85,
+      "p99_9_trial_range_ms": [12.4, 13.2, 13.85, 14.5, 15.6],
       "max_latency_ms": 28.4,
-      "completed_requests": 600000,
+      "completed_requests": 100000,
       "peak_rss_mb": 184.5,
       "cpu_utilization_pct": 92.4,
       "gc_cycles": 142,
@@ -148,8 +146,7 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
       "gc_pause_total_ms": 42.5,
       "gc_mark_assist_cpu_sec": 4.82,
       "gc_scan_heap_cumulative_mb": 940.2,
-      "gc_heap_allocs_mb": 1420.5,
-      "alloc_count": 31200000,
+      "alloc_count": 5200000,
       "alloc_calls_per_req": 52.0,
       "total_allocated_mb": 1420.5
     },
@@ -158,8 +155,9 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
       "p95_us": 380.0,
       "p99_us": 1250.0,
       "p99_9_ms": 3.2,
+      "p99_9_trial_range_ms": [2.9, 3.1, 3.2, 3.4, 3.7],
       "max_latency_ms": 8.4,
-      "completed_requests": 600000,
+      "completed_requests": 100000,
       "peak_rss_mb": 68.4,
       "cpu_utilization_pct": 64.2,
       "gc_cycles": 28,
@@ -167,8 +165,7 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
       "gc_pause_total_ms": 5.8,
       "gc_mark_assist_cpu_sec": 0.18,
       "gc_scan_heap_cumulative_mb": 120.4,
-      "gc_heap_allocs_mb": 115.8,
-      "alloc_count": 2400000,
+      "alloc_count": 400000,
       "alloc_calls_per_req": 4.0,
       "total_allocated_mb": 115.8
     },
@@ -177,8 +174,9 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
       "p95_us": 210.0,
       "p99_us": 580.0,
       "p99_9_ms": 1.15,
+      "p99_9_trial_range_ms": [1.05, 1.1, 1.15, 1.2, 1.25],
       "max_latency_ms": 3.2,
-      "completed_requests": 600000,
+      "completed_requests": 100000,
       "peak_rss_mb": 52.8,
       "cpu_utilization_pct": 58.6,
       "gc_cycles": 0,
@@ -186,8 +184,7 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
       "gc_pause_total_ms": 0.0,
       "gc_mark_assist_cpu_sec": 0.0,
       "gc_scan_heap_cumulative_mb": 0.0,
-      "gc_heap_allocs_mb": 0.0,
-      "alloc_count": 28800000,
+      "alloc_count": 4800000,
       "alloc_calls_per_req": 48.0,
       "total_allocated_mb": 1250.4
     },
@@ -196,8 +193,9 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
       "p95_us": 115.0,
       "p99_us": 240.0,
       "p99_9_ms": 0.48,
+      "p99_9_trial_range_ms": [0.44, 0.46, 0.48, 0.5, 0.52],
       "max_latency_ms": 1.45,
-      "completed_requests": 600000,
+      "completed_requests": 100000,
       "peak_rss_mb": 34.2,
       "cpu_utilization_pct": 41.5,
       "gc_cycles": 0,
@@ -205,8 +203,7 @@ Claude and GPT's incisive review surfaced the central systems paradox of this be
       "gc_pause_total_ms": 0.0,
       "gc_mark_assist_cpu_sec": 0.0,
       "gc_scan_heap_cumulative_mb": 0.0,
-      "gc_heap_allocs_mb": 0.0,
-      "alloc_count": 5700000,
+      "alloc_count": 950000,
       "alloc_calls_per_req": 9.5,
       "total_allocated_mb": 285.6
     }

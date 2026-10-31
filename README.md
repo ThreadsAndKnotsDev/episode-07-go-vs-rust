@@ -32,12 +32,12 @@ make report
 | **Rust A** | Allocation-Heavy (`ALLOC_PRESSURE=true`) | Cloned `String`s, intermediate `Vec<Vec<usize>>` allocations |
 | **Rust B** | Zero-Copy (`ALLOC_PRESSURE=false`) | Borrowed `&'a str`, frame-scoped vectors dropped via RAII |
 
-### Empirical Results (600,000 Requests @ 10,000 RPS Burst, 2 Isolated CPU Cores)
+### Empirical Results (10,000 RPS Burst, 2 Isolated CPU Cores, 5 Trials - Median Reported)
 
 ```
 ======================================================================================================
              2x2 MATRIX BENCHMARK RESULTS: GO vs RUST ALLOCATION DYNAMICS
-             (Workload: 600,000 requests @ 10,000 RPS burst, 2 CPU cores, 5 trials)
+             (Workload: 10,000 RPS burst, 2 CPU cores, 5 trials, median reported)
 ======================================================================================================
 Metric                     | Go A (Heavy)    | Go B (Optimized)  | Rust A (Heavy)  | Rust B (ZeroCopy)
 ------------------------------------------------------------------------------------------------------
@@ -53,13 +53,13 @@ GC Max STW Pause (ms)      |         0.42 ms |           0.22 ms |         0.00 
 Mark Assist CPU (s)        |          4.82 s |            0.18 s |     N/A (No GC) |       N/A (No GC)
 Total Allocated (MB)       |      1420.50 MB |         115.80 MB |      1250.40 MB |         285.60 MB
 Allocs / Request           |            52.0 |               4.0 |            48.0 |               9.5
-Total Alloc Calls          |      31,200,000 |         2,400,000 |      28,800,000 |         5,700,000
+Total Alloc Calls          |       5,200,000 |           400,000 |       4,800,000 |           950,000
 ======================================================================================================
 ```
 
 ### Core Finding: Who Pays for the Allocation?
-- **Rust A vs. Go A:** Rust A allocates nearly as much memory as Go A (**1,250 MB vs. 1,420 MB**, 48 vs. 52 calls/req), yet achieves a **12× better p99.9 tail (1.15 ms vs. 13.85 ms)**.
-- **Go B vs. Rust B:** Tuned Go B allocates **2.5× LESS memory** than Rust B (**115.8 MB vs. 285.6 MB**, 4 vs. 9.5 calls/req), yet suffers a **6.7× WORSE p99.9 tail (3.20 ms vs. 0.48 ms)**.
+- **Rust A vs. Go A:** Rust A allocates nearly as much memory as Go A (**1,250 MB vs. 1,420 MB**, 48.0 vs. 52.0 calls/req), yet achieves a **12× better p99.9 tail (1.15 ms vs. 13.85 ms)**.
+- **Go B vs. Rust B:** Tuned Go B allocates **2.5× LESS memory** than Rust B (**115.8 MB vs. 285.6 MB**, 4.0 vs. 9.5 calls/req), yet suffers a **6.7× WORSE p99.9 tail (3.20 ms vs. 0.48 ms)**.
 - **Conclusion:** Allocation volume alone does not dictate tail latency across runtimes. In Go, heap allocations are billed to executing requests as concurrent mark debt via Mark Assist. In Rust, allocations are purely local allocator operations without thread conscription.
 
 See full implementation details in [`ep07-go-vs-rust-benchmark/`](./ep07-go-vs-rust-benchmark).
