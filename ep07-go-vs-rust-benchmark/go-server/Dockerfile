@@ -41,3 +41,4 @@ HEALTHCHECK --interval=2s --timeout=2s --start-period=3s --retries=5 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["/app/go-server"]
+

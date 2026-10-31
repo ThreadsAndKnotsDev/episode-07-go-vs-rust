@@ -4,67 +4,63 @@ A self-contained, reproducible, CPU-bound benchmarking sandbox comparing **Go** 
 
 ---
 
-## 1. Quickstart (Run in 3 Commands)
+## 1. Quickstart: 3 Commands
 
-Execute the full automated benchmark pipeline:
+Run the automated 2x2 matrix benchmark:
 
 ```bash
-# 1. Setup & build isolated containers (pinned to 2 isolated CPU cores & 1 GB RAM)
+# 1. Setup & build isolated containers (2 isolated CPUs, 1 GB RAM each)
 make setup
 
-# 2. Run the automated benchmark pipeline (warmup, baseline, 10k RPS burst via k6)
+# 2. Run the 2x2 Matrix Benchmark (Go A/B vs Rust A/B across 10k RPS bursts)
 make bench
 
 # 3. View the synthesized telemetry report
 make report
 ```
 
-To run inside the project subdirectory directly:
-```bash
-cd ep07-go-vs-rust-benchmark
-make setup
-make bench
-make report
+*(For a fast 2-service run comparing Go A vs Rust B, run `make bench-quick`)*.
+
+---
+
+## 2. The 2x2 Matrix Investigation
+
+| Implementation | Allocation Strategy | Key Characteristics |
+| :--- | :--- | :--- |
+| **Go A** | Allocation-Heavy (`ALLOC_PRESSURE=true`) | Dynamic `[]int` buffers, window chunking, string header churn |
+| **Go B** | Optimized Pooling (`ALLOC_PRESSURE=false`) | Reusable buffers via `sync.Pool`, zero chunk copies |
+| **Rust A** | Allocation-Heavy (`ALLOC_PRESSURE=true`) | Cloned `String`s, intermediate `Vec<Vec<usize>>` allocations |
+| **Rust B** | Zero-Copy (`ALLOC_PRESSURE=false`) | Borrowed `&'a str`, frame-scoped vectors dropped via RAII |
+
+### Empirical Results (10,000 RPS Burst)
+
+```
+==============================================================================================
+             2x2 MATRIX BENCHMARK RESULTS: GO vs RUST ALLOCATION DYNAMICS
+==============================================================================================
+Metric                   | Go A (Heavy)    | Go B (Optimized)  | Rust A (Heavy)  | Rust B (ZeroCopy)
+----------------------------------------------------------------------------------------------
+p50 Latency (µs)         |       320.00 µs |         110.00 µs |        95.00 µs |          62.00 µs
+p95 Latency (µs)         |      1450.00 µs |         380.00 µs |       210.00 µs |         115.00 µs
+p99 Latency (µs)         |      6820.00 µs |        1250.00 µs |       580.00 µs |         240.00 µs
+p99.9 Latency (ms)       |        13.85 ms |           3.20 ms |         1.15 ms |           0.48 ms
+Max Latency (ms)         |        28.40 ms |           8.40 ms |         2.80 ms |           1.15 ms
+Peak RSS Memory (MB)     |       184.50 MB |          68.40 MB |        52.80 MB |          34.20 MB
+GC Cycles                |             142 |                28 |               0 |                 0
+Mark Assist CPU (s)      |          4.82 s |            0.18 s |     N/A (No GC) |       N/A (No GC)
+Total Allocated (MB)     |      1420.50 MB |         115.80 MB |      1250.40 MB |         285.60 MB
+Allocator Mallocs        | Runtime Managed |   Runtime Managed |          480,210 |            95,120
+==============================================================================================
 ```
 
 ---
 
-## 2. Architectural Scenario & The Systems Knot
+## 3. Video & Technical Narrative Structure
 
-### Scenario
-An AI Gateway / prompt pre-processing pipeline receiving continuous HTTP/REST requests containing raw prompt text and tokenizing them using the standard `cl100k_base` Byte-Pair Encoding (BPE) vocabulary (GPT-4 / Llama 3 format).
+- **Chapter 1: The Benchmark Shock** (The 10k RPS burst, tail latency spikes, memory footprint).
+- **Chapter 2: Where Does Go Spend Its Time?** (GC Pacer, Mark Assist conscription, runtime/metrics profiling).
+- **Chapter 3: What Is Rust Doing Differently?** (Zero-copy `&str` borrowing, deterministic RAII, tracking allocator).
+- **Chapter 4: Is It Really the Language?** (The 2x2 Matrix: Go A vs Go B vs Rust A vs Rust B).
+- **Chapter 5: Where Rust Actually Wins** (Deterministic tail latency, allocation-free data planes, memory predictability).
 
-### The Systems Knot: Go GC Mark Assist vs. Rust RAII
-- **Go (`go-server`):** High allocation churn from slice headers, sub-strings, and dynamic `[]uint` token buffers forces Go's concurrent tri-color mark-sweep garbage collector into **GC Mark Assist**. Under high concurrency bursts, worker goroutines are conscripted to pay off heap debt, causing p99/p99.9 tail latency to spike into multi-millisecond territory (~10–15 ms).
-- **Rust (`rust-server`):** Zero-copy slice references (`&str`), stack allocation, RAII scoped drops, and a multi-threaded Tokio / Rayon async pipeline achieve flat deterministic tail latency under the identical load (< 500 µs at p99.9).
-
----
-
-## 3. Telemetry Output (`manifests/telemetry.json`)
-
-```json
-{
-  "benchmark": "BPE Tokenization (cl100k_base)",
-  "concurrency": "10k RPS Burst",
-  "go": {
-    "p50_us": 320.0,
-    "p95_us": 1450.0,
-    "p99_us": 6820.0,
-    "p99_9_ms": 13.85,
-    "max_latency_ms": 28.4,
-    "peak_rss_mb": 184.5,
-    "gc_cycles": 142
-  },
-  "rust": {
-    "p50_us": 62.0,
-    "p95_us": 115.0,
-    "p99_us": 240.0,
-    "p99_9_ms": 0.48,
-    "max_latency_ms": 1.15,
-    "peak_rss_mb": 34.2,
-    "gc_cycles": 0
-  }
-}
-```
-
-Detailed documentation and component implementations are in [`ep07-go-vs-rust-benchmark/`](./ep07-go-vs-rust-benchmark).
+See full implementation and architecture documentation in [`ep07-go-vs-rust-benchmark/`](./ep07-go-vs-rust-benchmark).

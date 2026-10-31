@@ -1,4 +1,4 @@
-.PHONY: help setup bench report clean go-dev rust-dev
+.PHONY: help setup bench bench-matrix bench-quick report clean go-dev rust-dev
 
 help:
 	@$(MAKE) -C ep07-go-vs-rust-benchmark help
@@ -8,6 +8,12 @@ setup:
 
 bench:
 	@$(MAKE) -C ep07-go-vs-rust-benchmark bench
+
+bench-matrix:
+	@$(MAKE) -C ep07-go-vs-rust-benchmark bench-matrix
+
+bench-quick:
+	@$(MAKE) -C ep07-go-vs-rust-benchmark bench-quick
 
 report:
 	@$(MAKE) -C ep07-go-vs-rust-benchmark report

@@ -34,19 +34,29 @@ type TokenizeResponse struct {
 
 // MetricsResponse holds operational telemetry exposed to benchmark runners.
 type MetricsResponse struct {
-	GCCycles          uint32  `json:"gc_cycles"`
-	HeapAllocBytes    uint64  `json:"heap_alloc_bytes"`
-	TotalAllocBytes   uint64  `json:"total_alloc_bytes"`
-	HeapSysBytes      uint64  `json:"heap_sys_bytes"`
-	GCPauseTotalNs    uint64  `json:"gc_pause_total_ns"`
-	GCCPUFraction     float64 `json:"gc_cpu_fraction"`
-	GCMarkAssistSec   float64 `json:"gc_mark_assist_cpu_seconds"`
-	Goroutines        int     `json:"goroutines"`
-	PeakRSSMB         float64 `json:"peak_rss_mb"`
-	AllocPressure     bool    `json:"alloc_pressure"`
-	TotalRequests     uint64  `json:"total_requests"`
-	TotalTokens       uint64  `json:"total_tokens"`
-	ServerUptimeSec   float64 `json:"uptime_seconds"`
+	// Standard GC Metrics
+	GCCycles        uint32  `json:"gc_cycles"`
+	HeapAllocBytes  uint64  `json:"heap_alloc_bytes"`
+	TotalAllocBytes uint64  `json:"total_alloc_bytes"`
+	HeapSysBytes    uint64  `json:"heap_sys_bytes"`
+	GCPauseTotalNs  uint64  `json:"gc_pause_total_ns"`
+	GCCPUFraction   float64 `json:"gc_cpu_fraction"`
+	Goroutines      int     `json:"goroutines"`
+	PeakRSSMB       float64 `json:"peak_rss_mb"`
+	AllocPressure   bool    `json:"alloc_pressure"`
+
+	// Granular Go Runtime Instrumentation (Proving the Causal Chain)
+	GCMarkAssistCPUSeconds float64 `json:"gc_mark_assist_cpu_seconds"`
+	GCTotalCPUSeconds      float64 `json:"gc_total_cpu_seconds"`
+	UserCPUSeconds         float64 `json:"user_cpu_seconds"`
+	GCScanHeapBytes        uint64  `json:"gc_scan_heap_bytes"`
+	GCHeapAllocsBytes      uint64  `json:"gc_heap_allocs_bytes"`
+	GCHeapFreesBytes       uint64  `json:"gc_heap_frees_bytes"`
+
+	// Throughput Telemetry
+	TotalRequests   uint64  `json:"total_requests"`
+	TotalTokens     uint64  `json:"total_tokens"`
+	ServerUptimeSec float64 `json:"uptime_seconds"`
 }
 
 var (
@@ -59,10 +69,10 @@ var (
 	totalRequests uint64
 	totalTokens   uint64
 
-	// Slice buffer pool used when ALLOC_PRESSURE=false
+	// Slice buffer pool used when ALLOC_PRESSURE=false (Go B: Optimized)
 	tokenPool = sync.Pool{
 		New: func() any {
-			b := make([]int, 0, 2048)
+			b := make([]int, 0, 4096)
 			return &b
 		},
 	}
@@ -78,7 +88,6 @@ func initTokenizer() error {
 }
 
 // readRSSMB attempts to read Resident Set Size (RSS) in MB from Linux /proc/self/statm.
-// Falls back to runtime.MemStats Sys if running on non-Linux hosts.
 func readRSSMB(sysBytes uint64) float64 {
 	statm, err := os.ReadFile("/proc/self/statm")
 	if err == nil {
@@ -95,16 +104,57 @@ func readRSSMB(sysBytes uint64) float64 {
 	return float64(sysBytes) / (1024 * 1024)
 }
 
-// readGCMarkAssistSeconds queries Go 1.20+ runtime/metrics for GC mark assist CPU time.
-func readGCMarkAssistSeconds() float64 {
-	const metricName = "/cpu/classes/gc/mark/assist:cpu-seconds"
-	sample := make([]metrics.Sample, 1)
-	sample[0].Name = metricName
-	metrics.Read(sample)
-	if sample[0].Value.Kind() == metrics.KindFloat64 {
-		return sample[0].Value.Float64()
+// readRuntimeMetrics extracts detailed GC pacer and Mark Assist counters from runtime/metrics.
+func readRuntimeMetrics() (markAssistSec, gcCPUSec, userCPUSec float64, scanHeapBytes, heapAllocsBytes, heapFreesBytes uint64) {
+	const (
+		metricMarkAssist = "/cpu/classes/gc/mark/assist:cpu-seconds"
+		metricGCTotal    = "/cpu/classes/gc/total:cpu-seconds"
+		metricUserCPU    = "/cpu/classes/user:cpu-seconds"
+		metricScanHeap   = "/gc/scan/heap:bytes"
+		metricHeapAllocs = "/gc/heap/allocs:bytes"
+		metricHeapFrees  = "/gc/heap/frees:bytes"
+	)
+
+	samples := []metrics.Sample{
+		{Name: metricMarkAssist},
+		{Name: metricGCTotal},
+		{Name: metricUserCPU},
+		{Name: metricScanHeap},
+		{Name: metricHeapAllocs},
+		{Name: metricHeapFrees},
 	}
-	return 0.0
+
+	metrics.Read(samples)
+
+	for _, sample := range samples {
+		switch sample.Name {
+		case metricMarkAssist:
+			if sample.Value.Kind() == metrics.KindFloat64 {
+				markAssistSec = sample.Value.Float64()
+			}
+		case metricGCTotal:
+			if sample.Value.Kind() == metrics.KindFloat64 {
+				gcCPUSec = sample.Value.Float64()
+			}
+		case metricUserCPU:
+			if sample.Value.Kind() == metrics.KindFloat64 {
+				userCPUSec = sample.Value.Float64()
+			}
+		case metricScanHeap:
+			if sample.Value.Kind() == metrics.KindUint64 {
+				scanHeapBytes = sample.Value.Uint64()
+			}
+		case metricHeapAllocs:
+			if sample.Value.Kind() == metrics.KindUint64 {
+				heapAllocsBytes = sample.Value.Uint64()
+			}
+		case metricHeapFrees:
+			if sample.Value.Kind() == metrics.KindUint64 {
+				heapFreesBytes = sample.Value.Uint64()
+			}
+		}
+	}
+	return
 }
 
 func handleTokenize(w http.ResponseWriter, r *http.Request) {
@@ -135,19 +185,22 @@ func handleTokenize(w http.ResponseWriter, r *http.Request) {
 	tokens := tokenizer.Encode(req.Text, nil, nil)
 	tokenCount := len(tokens)
 
-	// Systems Knot demonstration:
-	// When ALLOC_PRESSURE=true, we intentionally generate realistic AI gateway pipeline
-	// allocation churn: dynamic slice reallocation, intermediate token copying,
-	// window extraction, and string manipulation without memory pooling.
-	// Under high RPS (2k-10k+ burst), this continuous allocation rate forces Go's
-	// concurrent tri-color GC into "Mark Assist", conscripting HTTP worker goroutines
-	// to pay off heap debt and driving p99/p99.9 latency to multi-millisecond spikes.
+	// =========================================================================
+	// 2x2 Matrix Strategy:
+	// Go A (ALLOC_PRESSURE=true): Allocation-heavy. Dynamic slice buffers,
+	// window chunk copies, and substring headers. Under 10k RPS burst, the high
+	// allocation rate triggers the GC pacer and conscripts worker goroutines
+	// into GC Mark Assist.
+	//
+	// Go B (ALLOC_PRESSURE=false): Optimized, low-allocation. Reusable token
+	// slice buffer from sync.Pool without intermediate chunk cloning.
+	// =========================================================================
 	if allocPressure {
-		// 1. Dynamic buffer allocation for token transformation
+		// 1. Dynamic buffer allocation on heap
 		dynamicBuf := make([]int, tokenCount)
 		copy(dynamicBuf, tokens)
 
-		// 2. Simulate sliding-window chunking / prompt pre-processing
+		// 2. Intermediate window slicing simulation
 		chunkSize := 128
 		if chunkSize > tokenCount {
 			chunkSize = tokenCount
@@ -163,19 +216,18 @@ func handleTokenize(w http.ResponseWriter, r *http.Request) {
 				copy(subSlice, dynamicBuf[i:end])
 				windows = append(windows, subSlice)
 			}
-			// Keep dynamic allocation references alive to ensure heap mark visibility
 			if len(windows) > 0 && len(windows[0]) > 0 {
 				dynamicBuf[0] ^= windows[0][0]
 			}
 		}
 
-		// 3. Dynamic header churn: substring allocations
+		// 3. String header churn
 		if len(req.Text) > 64 {
 			prefixCopy := strings.Clone(req.Text[:64])
 			_ = prefixCopy
 		}
 	} else {
-		// Pooled allocation mode
+		// Go B (Optimized): Reuse slice memory from sync.Pool
 		bufPtr := tokenPool.Get().(*[]int)
 		buf := (*bufPtr)[:0]
 		buf = append(buf, tokens...)
@@ -200,25 +252,32 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
+	markAssistSec, gcCPUSec, userCPUSec, scanHeapBytes, heapAllocsBytes, heapFreesBytes := readRuntimeMetrics()
+
 	metricsMutex.RLock()
 	reqs := totalRequests
 	toks := totalTokens
 	metricsMutex.RUnlock()
 
 	resp := MetricsResponse{
-		GCCycles:          m.NumGC,
-		HeapAllocBytes:    m.HeapAlloc,
-		TotalAllocBytes:   m.TotalAlloc,
-		HeapSysBytes:      m.HeapSys,
-		GCPauseTotalNs:    m.PauseTotalNs,
-		GCCPUFraction:     m.GCCPUFraction,
-		GCMarkAssistSec:   readGCMarkAssistSeconds(),
-		Goroutines:        runtime.NumGoroutine(),
-		PeakRSSMB:         readRSSMB(m.Sys),
-		AllocPressure:     allocPressure,
-		TotalRequests:     reqs,
-		TotalTokens:       toks,
-		ServerUptimeSec:   time.Since(startTime).Seconds(),
+		GCCycles:               m.NumGC,
+		HeapAllocBytes:         m.HeapAlloc,
+		TotalAllocBytes:        m.TotalAlloc,
+		HeapSysBytes:           m.HeapSys,
+		GCPauseTotalNs:         m.PauseTotalNs,
+		GCCPUFraction:          m.GCCPUFraction,
+		Goroutines:             runtime.NumGoroutine(),
+		PeakRSSMB:              readRSSMB(m.Sys),
+		AllocPressure:          allocPressure,
+		GCMarkAssistCPUSeconds: markAssistSec,
+		GCTotalCPUSeconds:      gcCPUSec,
+		UserCPUSeconds:         userCPUSec,
+		GCScanHeapBytes:        scanHeapBytes,
+		GCHeapAllocsBytes:      heapAllocsBytes,
+		GCHeapFreesBytes:       heapFreesBytes,
+		TotalRequests:          reqs,
+		TotalTokens:            toks,
+		ServerUptimeSec:        time.Since(startTime).Seconds(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -237,7 +296,6 @@ func main() {
 	portFlag := flag.String("port", "", "Server HTTP port")
 	flag.Parse()
 
-	// Handle cache directory if specified
 	if cacheDir := os.Getenv("TIKTOKEN_CACHE_DIR"); cacheDir != "" {
 		_ = os.MkdirAll(cacheDir, 0755)
 	}
@@ -249,11 +307,10 @@ func main() {
 	log.Printf("[go-server] cl100k_base loaded successfully.")
 
 	if *warmupFlag || *preloadFlag {
-		log.Printf("[go-server] Warmup/preload completed successfully. Exiting.")
+		log.Printf("[go-server] Preload completed successfully.")
 		os.Exit(0)
 	}
 
-	// Determine port
 	port := "8080"
 	if *portFlag != "" {
 		port = *portFlag
@@ -261,11 +318,16 @@ func main() {
 		port = envPort
 	}
 
-	// Determine ALLOC_PRESSURE configuration
 	if envAlloc := os.Getenv("ALLOC_PRESSURE"); envAlloc != "" {
 		allocPressure = (strings.ToLower(envAlloc) == "true" || envAlloc == "1")
 	}
 
+	strategy := "Go A (Allocation-Heavy / Dynamic Churn)"
+	if !allocPressure {
+		strategy = "Go B (Optimized / Buffer-Pool Reuse)"
+	}
+
+	log.Printf("[go-server] Strategy: %s", strategy)
 	log.Printf("[go-server] Configuration: PORT=%s, ALLOC_PRESSURE=%t, GOGC=%s, GOMAXPROCS=%d",
 		port, allocPressure, os.Getenv("GOGC"), runtime.GOMAXPROCS(0))
 
@@ -274,8 +336,6 @@ func main() {
 	mux.HandleFunc("/metrics", handleMetrics)
 	mux.HandleFunc("/stats", handleMetrics)
 	mux.HandleFunc("/health", handleHealth)
-
-	// Mount default pprof handlers on mux
 	mux.HandleFunc("/debug/pprof/", http.DefaultServeMux.ServeHTTP)
 
 	server := &http.Server{
@@ -285,7 +345,6 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	// Graceful shutdown handling
 	serverErrors := make(chan error, 1)
 	go func() {
 		log.Printf("[go-server] Listening and serving HTTP on :%s", port)

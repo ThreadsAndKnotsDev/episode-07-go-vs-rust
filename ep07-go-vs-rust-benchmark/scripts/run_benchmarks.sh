@@ -10,15 +10,13 @@ cd "${PROJECT_DIR}"
 MANIFESTS_DIR="${PROJECT_DIR}/manifests"
 mkdir -p "${MANIFESTS_DIR}"
 
-GO_SUMMARY="${MANIFESTS_DIR}/go_summary.json"
-RUST_SUMMARY="${MANIFESTS_DIR}/rust_summary.json"
-GO_STATS="${MANIFESTS_DIR}/go_stats.json"
-RUST_STATS="${MANIFESTS_DIR}/rust_stats.json"
+RUN_MATRIX="${RUN_MATRIX:-true}"
 
 echo "================================================================================"
-echo "    AI TOKENIZATION BENCHMARK: GO VS RUST DATA PLANE HARNESS"
+echo "    AI TOKENIZATION BENCHMARK: 2x2 MATRIX INVESTIGATION HARNESS"
 echo "    Workload: cl100k_base BPE Tokenizer (GPT-4 / Llama 3 Format)"
 echo "    Hardware Limit: 2 Pinned CPU Cores, 1 GB RAM per Container"
+echo "    Matrix: [Go A, Go B] vs [Rust A, Rust B]"
 echo "================================================================================"
 
 # Resolve Docker Compose command
@@ -31,7 +29,6 @@ else
     exit 1
 fi
 
-# Detect k6 runner (local binary vs containerized)
 RUN_K6() {
     local target_url="$1"
     local summary_file="$2"
@@ -82,87 +79,90 @@ wait_for_health() {
     echo "[Healthcheck] ${service_name} is UP and ready."
 }
 
-# ==============================================================================
-# PHASE 1: BENCHMARK GO SERVER
-# ==============================================================================
-echo ""
-echo "--------------------------------------------------------------------------------"
-echo ">>> [Phase 1/2] Starting Go Server (Port 8080, ALLOC_PRESSURE=true, GOGC=100)..."
-echo "--------------------------------------------------------------------------------"
+flush_system_cache() {
+    if [ "$(id -u)" -eq 0 ]; then
+        echo ">>> Flushing kernel page cache..."
+        sync
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    fi
+    sleep 3
+}
 
-${DOCKER_COMPOSE} down --remove-orphans >/dev/null 2>&1 || true
-${DOCKER_COMPOSE} up -d --build go-server
+benchmark_service() {
+    local service_name="$1"
+    local container_name="$2"
+    local port="$3"
+    local summary_file="$4"
+    local stats_file="$5"
+    local description="$6"
 
-wait_for_health "http://localhost:8080/health" "go-server"
+    echo ""
+    echo "================================================================================"
+    echo ">>> Running Benchmark: ${description} (Container: ${container_name})"
+    echo "================================================================================"
 
-echo ""
-echo ">>> Executing k6 load test against Go server..."
-RUN_K6 "http://localhost:8080/tokenize" "${GO_SUMMARY}"
+    ${DOCKER_COMPOSE} down --remove-orphans >/dev/null 2>&1 || true
+    ${DOCKER_COMPOSE} up -d --build "${service_name}"
 
-echo ""
-echo ">>> Capturing Go server operational telemetry & memory stats..."
-# Capture docker memory stats
-DOCKER_GO_STATS=$(docker stats --no-stream --format '{"mem_usage":"{{.MemUsage}}","cpu_perc":"{{.CPUPerc}}"}' benchmark-go-server 2>/dev/null || echo '{}')
-# Query internal server telemetry
-SERVER_GO_METRICS=$(curl -s http://localhost:8080/metrics 2>/dev/null || echo '{}')
+    wait_for_health "http://localhost:${port}/health" "${service_name}"
 
-cat <<EOF > "${GO_STATS}"
+    echo ">>> Executing k6 load test (500 -> 2,000 -> 10,000 RPS)..."
+    RUN_K6 "http://localhost:${port}/tokenize" "${summary_file}"
+
+    echo ">>> Capturing telemetry and memory stats..."
+    DOCKER_STATS=$(docker stats --no-stream --format '{"mem_usage":"{{.MemUsage}}","cpu_perc":"{{.CPUPerc}}"}' "${container_name}" 2>/dev/null || echo '{}')
+    SERVER_METRICS=$(curl -s "http://localhost:${port}/metrics" 2>/dev/null || echo '{}')
+
+    cat <<EOF > "${stats_file}"
 {
-  "docker": ${DOCKER_GO_STATS},
-  "metrics": ${SERVER_GO_METRICS}
+  "docker": ${DOCKER_STATS},
+  "metrics": ${SERVER_METRICS}
 }
 EOF
 
-echo "[Phase 1 Complete] Stopping Go Server..."
-${DOCKER_COMPOSE} stop go-server >/dev/null 2>&1 || true
+    echo "[Done] Stopping ${service_name}..."
+    ${DOCKER_COMPOSE} stop "${service_name}" >/dev/null 2>&1 || true
+    flush_system_cache
+}
 
-# Flush OS page cache to eliminate cross-benchmark caching noise (if permitted)
-if [ "$(id -u)" -eq 0 ]; then
-    echo ">>> Flushing kernel page cache..."
-    sync
-    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+# ==============================================================================
+# EXECUTE BENCHMARKS
+# ==============================================================================
+
+# 1. Go A: Allocation-Heavy
+benchmark_service "go-server-a" "benchmark-go-server-a" "8080" \
+    "${MANIFESTS_DIR}/go_a_summary.json" "${MANIFESTS_DIR}/go_a_stats.json" \
+    "Go A: Allocation-Heavy (Dynamic Churn, GOGC=100)"
+
+if [ "${RUN_MATRIX}" = "true" ]; then
+    # 2. Go B: Optimized Buffer Reuse
+    benchmark_service "go-server-b" "benchmark-go-server-b" "8080" \
+        "${MANIFESTS_DIR}/go_b_summary.json" "${MANIFESTS_DIR}/go_b_stats.json" \
+        "Go B: Optimized (sync.Pool Buffer Reuse)"
+
+    # 3. Rust A: Allocation-Heavy
+    benchmark_service "rust-server-a" "benchmark-rust-server-a" "8081" \
+        "${MANIFESTS_DIR}/rust_a_summary.json" "${MANIFESTS_DIR}/rust_a_stats.json" \
+        "Rust A: Allocation-Heavy (Cloned Strings & Dynamic Vectors)"
 fi
-sleep 3
+
+# 4. Rust B: Zero-Copy
+benchmark_service "rust-server-b" "benchmark-rust-server-b" "8081" \
+    "${MANIFESTS_DIR}/rust_b_summary.json" "${MANIFESTS_DIR}/rust_b_stats.json" \
+    "Rust B: Zero-Copy (Borrowed &'a str, Scoped Drops)"
+
+# Maintain symlinks / copies for backward compatibility
+cp "${MANIFESTS_DIR}/go_a_summary.json" "${MANIFESTS_DIR}/go_summary.json"
+cp "${MANIFESTS_DIR}/go_a_stats.json" "${MANIFESTS_DIR}/go_stats.json"
+cp "${MANIFESTS_DIR}/rust_b_summary.json" "${MANIFESTS_DIR}/rust_summary.json"
+cp "${MANIFESTS_DIR}/rust_b_stats.json" "${MANIFESTS_DIR}/rust_stats.json"
 
 # ==============================================================================
-# PHASE 2: BENCHMARK RUST SERVER
-# ==============================================================================
-echo ""
-echo "--------------------------------------------------------------------------------"
-echo ">>> [Phase 2/2] Starting Rust Server (Port 8081, Zero-Copy Tokio Runtime)..."
-echo "--------------------------------------------------------------------------------"
-
-${DOCKER_COMPOSE} up -d --build rust-server
-
-wait_for_health "http://localhost:8081/health" "rust-server"
-
-echo ""
-echo ">>> Executing k6 load test against Rust server..."
-RUN_K6 "http://localhost:8081/tokenize" "${RUST_SUMMARY}"
-
-echo ""
-echo ">>> Capturing Rust server operational telemetry & memory stats..."
-# Capture docker memory stats
-DOCKER_RUST_STATS=$(docker stats --no-stream --format '{"mem_usage":"{{.MemUsage}}","cpu_perc":"{{.CPUPerc}}"}' benchmark-rust-server 2>/dev/null || echo '{}')
-# Query internal server telemetry
-SERVER_RUST_METRICS=$(curl -s http://localhost:8081/metrics 2>/dev/null || echo '{}')
-
-cat <<EOF > "${RUST_STATS}"
-{
-  "docker": ${DOCKER_RUST_STATS},
-  "metrics": ${SERVER_RUST_METRICS}
-}
-EOF
-
-echo "[Phase 2 Complete] Stopping Rust Server..."
-${DOCKER_COMPOSE} stop rust-server >/dev/null 2>&1 || true
-
-# ==============================================================================
-# PHASE 3: EXTRACT AND SYNTHESIZE TELEMETRY
+# SYNTHESIZE TELEMETRY MATRIX
 # ==============================================================================
 echo ""
 echo "--------------------------------------------------------------------------------"
-echo ">>> Synthesizing Comparative Telemetry into manifests/telemetry.json..."
+echo ">>> Synthesizing 2x2 Telemetry Matrix into manifests/telemetry.json..."
 echo "--------------------------------------------------------------------------------"
 
 PYTHON_BIN="python3"
@@ -176,12 +176,12 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 ${PYTHON_BIN} "${PROJECT_DIR}/scripts/extract_telemetry.py" \
-    --go-summary "${GO_SUMMARY}" \
-    --rust-summary "${RUST_SUMMARY}" \
-    --go-stats "${GO_STATS}" \
-    --rust-stats "${RUST_STATS}" \
+    --go-summary "${MANIFESTS_DIR}/go_summary.json" \
+    --rust-summary "${MANIFESTS_DIR}/rust_summary.json" \
+    --go-stats "${MANIFESTS_DIR}/go_stats.json" \
+    --rust-stats "${MANIFESTS_DIR}/rust_stats.json" \
     --output "${MANIFESTS_DIR}/telemetry.json"
 
 echo ""
 echo ">>> Benchmark pipeline completed successfully!"
-echo ">>> Inspect results at: ${MANIFESTS_DIR}/telemetry.json"
+echo ">>> Canonical output: ${MANIFESTS_DIR}/telemetry.json"

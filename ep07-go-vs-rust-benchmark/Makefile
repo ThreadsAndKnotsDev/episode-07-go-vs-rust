@@ -1,4 +1,4 @@
-.PHONY: help setup bench report clean go-dev rust-dev test
+.PHONY: help setup bench bench-matrix bench-quick report clean go-dev rust-dev test
 
 SHELL := /bin/bash
 PYTHON ?= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
@@ -6,14 +6,15 @@ DOCKER_COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker
 
 help:
 	@echo "================================================================================"
-	@echo "  High-Throughput Go vs Rust Tokenization Benchmark (cl100k_base Data Plane)"
+	@echo "  High-Throughput Go vs Rust Tokenization Benchmark (2x2 Matrix Harness)"
 	@echo "================================================================================"
-	@echo "  make setup    - Build isolated Docker containers (pinned to 2 CPUs, 1GB RAM)"
-	@echo "  make bench    - Execute end-to-end benchmark pipeline (Go vs Rust via k6)"
-	@echo "  make report   - Print telemetry comparison table from manifests/telemetry.json"
-	@echo "  make clean    - Tear down containers and clean up temporary metrics files"
-	@echo "  make go-dev   - Run Go server locally on port 8080 (ALLOC_PRESSURE=true)"
-	@echo "  make rust-dev - Run Rust server locally on port 8081 (Release build)"
+	@echo "  make setup        - Build isolated Docker containers (2 CPUs, 1GB RAM each)"
+	@echo "  make bench        - Execute full 2x2 matrix benchmark (Go A/B vs Rust A/B)"
+	@echo "  make bench-quick  - Fast comparison: Go A (Allocation-Heavy) vs Rust B (Zero-Copy)"
+	@echo "  make report       - Print telemetry comparison table from manifests/telemetry.json"
+	@echo "  make clean        - Tear down containers and clean up temporary metrics files"
+	@echo "  make go-dev       - Run Go server locally on port 8080 (ALLOC_PRESSURE=true)"
+	@echo "  make rust-dev     - Run Rust server locally on port 8081 (Release build)"
 	@echo "================================================================================"
 
 setup:
@@ -24,10 +25,17 @@ setup:
 	@mkdir -p manifests
 	@echo ">>> Setup completed successfully."
 
-bench:
-	@echo ">>> Launching automated Go vs Rust tokenization benchmark harness..."
+bench: bench-matrix
+
+bench-matrix:
+	@echo ">>> Launching 2x2 Matrix Benchmark (Go A/B vs Rust A/B)..."
 	@chmod +x scripts/run_benchmarks.sh
-	@./scripts/run_benchmarks.sh
+	@RUN_MATRIX=true ./scripts/run_benchmarks.sh
+
+bench-quick:
+	@echo ">>> Launching Quick Benchmark (Go A vs Rust B)..."
+	@chmod +x scripts/run_benchmarks.sh
+	@RUN_MATRIX=false ./scripts/run_benchmarks.sh
 
 report:
 	@$(PYTHON) scripts/extract_telemetry.py
@@ -35,7 +43,7 @@ report:
 clean:
 	@echo ">>> Tearing down benchmark containers and cleaning artifacts..."
 	@$(DOCKER_COMPOSE) down --remove-orphans 2>/dev/null || true
-	@rm -f manifests/go_summary.json manifests/rust_summary.json manifests/go_stats.json manifests/rust_stats.json
+	@rm -f manifests/*_summary.json manifests/*_stats.json
 	@echo ">>> Clean completed."
 
 go-dev:

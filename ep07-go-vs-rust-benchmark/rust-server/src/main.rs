@@ -8,22 +8,55 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    alloc::{GlobalAlloc, Layout, System},
     fs,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Instant,
 };
 use tiktoken_rs::{cl100k_base, CoreBPE};
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+// =============================================================================
+// TRACKING ALLOCATOR (Empirical Allocation Measurement)
+// Instruments every heap allocation and deallocation to replace speculation
+// with exact, reproducible metrics.
+// =============================================================================
+struct TrackingAllocator;
+
+static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+static DEALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+static DEALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+
+unsafe impl GlobalAlloc for TrackingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = System.alloc(layout);
+        if !ptr.is_null() {
+            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout);
+        DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        DEALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+    }
+}
+
+#[global_allocator]
+static GLOBAL: TrackingAllocator = TrackingAllocator;
+
 /// Zero-copy deserialization of incoming prompt payload.
-/// The `&'a str` slice points directly into the request body memory buffer,
-/// avoiding intermediate heap allocation for text extraction.
+/// When ALLOC_PRESSURE=false (Rust B), the &'a str borrows directly from the contiguous
+/// Bytes buffer, requiring zero string copying.
 #[derive(Deserialize)]
 struct TokenizeRequest<'a> {
     #[serde(borrow)]
@@ -39,18 +72,30 @@ struct TokenizeResponse {
 /// Operational telemetry exposed to the benchmarking harness.
 #[derive(Serialize)]
 struct MetricsResponse {
+    // GC Metrics (always 0 in Rust)
     gc_cycles: u32,
     gc_pause_total_ns: u64,
+
+    // Empirical Allocator Metrics (Replacing Hypotheses with Direct Measurement)
+    alloc_count: u64,
+    dealloc_count: u64,
+    total_allocated_bytes: u64,
+    current_heap_bytes: u64,
+
+    // System & Throughput Telemetry
     peak_rss_mb: f64,
+    alloc_pressure: bool,
+    strategy: String,
     total_requests: u64,
     uptime_seconds: f64,
 }
 
-/// Shared application state holding cached BPE vocabulary and metrics counters.
+/// Shared application state holding cached BPE vocabulary and configuration.
 struct AppState {
     bpe: Arc<CoreBPE>,
     start_time: Instant,
     request_counter: AtomicU64,
+    alloc_pressure: bool,
 }
 
 /// Read Resident Set Size (RSS) in MB from Linux /proc/self/statm.
@@ -67,12 +112,16 @@ fn read_rss_mb() -> f64 {
     0.0
 }
 
-/// Tokenize handler leveraging zero-copy slice references and deterministic RAII deallocation.
+/// Tokenize handler testing the 2x2 Matrix Strategy:
+/// - Rust A (ALLOC_PRESSURE=true): Allocation-heavy. Clones owned strings, allocates
+///   intermediate sub-vectors, and produces heap churn to test allocator contention.
+/// - Rust B (ALLOC_PRESSURE=false): Zero-copy. Borrows &'a str directly from Bytes,
+///   with scoped vector allocation dropped deterministically via RAII.
 async fn handle_tokenize(
     State(state): State<Arc<AppState>>,
     body: Bytes,
 ) -> Result<Json<TokenizeResponse>, (StatusCode, String)> {
-    // 1. Zero-copy deserialization: borrows directly from contiguous Bytes buffer
+    // 1. Deserialization
     let req: TokenizeRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON payload: {}", e)))?;
 
@@ -83,26 +132,75 @@ async fn handle_tokenize(
         ));
     }
 
-    // 2. High-performance BPE tokenization
-    // The tokens vector is allocated within the local call frame.
-    // In Rust, there is no GC pacer, no background tri-color marking, and no GC Mark Assist.
-    // The vector memory is returned to the thread-local allocator cache immediately on drop (RAII),
-    // guaranteeing flat, deterministic tail latency (<100 µs) under 10k+ RPS bursts.
-    let tokens = state.bpe.encode_ordinary(req.text);
-    let token_count = tokens.len();
+    let token_count: usize;
 
-    // 3. Atomically increment request telemetry
+    if state.alloc_pressure {
+        // =====================================================================
+        // Rust A: Allocation-Heavy Mode
+        // Forces intermediate string cloning and dynamic vector reallocations
+        // to isolate language syntax vs memory allocation discipline.
+        // =====================================================================
+        let owned_text: String = req.text.to_string(); // Heap allocation 1
+
+        let tokens = state.bpe.encode_ordinary(&owned_text); // Heap allocation 2
+        token_count = tokens.len();
+
+        // Intermediate vector slicing / chunk allocations
+        let mut chunks: Vec<Vec<usize>> = Vec::with_capacity(tokens.len() / 128 + 1);
+        for chunk in tokens.chunks(128) {
+            chunks.push(chunk.to_vec()); // Multiple heap allocations
+        }
+
+        // Substring cloning
+        if owned_text.len() > 64 {
+            let prefix = owned_text[..64].to_string(); // Heap allocation
+            let _ = prefix;
+        }
+
+        // chunks and owned_text dropped here via RAII
+    } else {
+        // =====================================================================
+        // Rust B: Zero-Copy Mode
+        // Zero string heap copies. Tokens vector is frame-scoped and dropped
+        // immediately, proving minimal allocator overhead and zero GC pauses.
+        // =====================================================================
+        let tokens = state.bpe.encode_ordinary(req.text);
+        token_count = tokens.len();
+        // tokens vector dropped immediately here via RAII
+    }
+
     state.request_counter.fetch_add(1, Ordering::Relaxed);
-
     Ok(Json(TokenizeResponse { token_count }))
 }
 
-/// Metrics handler returning operational counters for comparison against Go server.
+/// Metrics handler returning operational counters and exact allocator statistics.
 async fn handle_metrics(State(state): State<Arc<AppState>>) -> Json<MetricsResponse> {
+    let alloc_c = ALLOC_COUNT.load(Ordering::Relaxed);
+    let dealloc_c = DEALLOC_COUNT.load(Ordering::Relaxed);
+    let alloc_b = ALLOC_BYTES.load(Ordering::Relaxed);
+    let dealloc_b = DEALLOC_BYTES.load(Ordering::Relaxed);
+    let current_heap = if alloc_b >= dealloc_b {
+        alloc_b - dealloc_b
+    } else {
+        0
+    };
+
+    let strategy_label = if state.alloc_pressure {
+        "Rust A (Allocation-Heavy / Cloned Churn)".to_string()
+    } else {
+        "Rust B (Zero-Copy / Low Allocation)".to_string()
+    };
+
     Json(MetricsResponse {
-        gc_cycles: 0,         // Zero GC runtime in Rust
-        gc_pause_total_ns: 0, // Deterministic memory management
+        gc_cycles: 0,
+        gc_pause_total_ns: 0,
+        alloc_count: alloc_c,
+        dealloc_count: dealloc_c,
+        total_allocated_bytes: alloc_b,
+        current_heap_bytes: current_heap,
         peak_rss_mb: read_rss_mb(),
+        alloc_pressure: state.alloc_pressure,
+        strategy: strategy_label,
         total_requests: state.request_counter.load(Ordering::Relaxed),
         uptime_seconds: state.start_time.elapsed().as_secs_f64(),
     })
@@ -123,7 +221,6 @@ async fn handle_health() -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize structured logging
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -136,10 +233,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bpe = cl100k_base().expect("failed to load cl100k_base BPE vocabulary");
     info!("[rust-server] cl100k_base vocabulary loaded successfully into memory.");
 
+    let alloc_pressure = match std::env::var("ALLOC_PRESSURE") {
+        Ok(val) => val.to_lowercase() == "true" || val == "1",
+        Err(_) => false, // Default to Rust B (Zero-copy)
+    };
+
+    let strategy_label = if alloc_pressure {
+        "Rust A (Allocation-Heavy / Cloned Churn)"
+    } else {
+        "Rust B (Zero-Copy / Low Allocation)"
+    };
+    info!("[rust-server] Strategy: {}", strategy_label);
+
     let state = Arc::new(AppState {
         bpe: Arc::new(bpe),
         start_time: Instant::now(),
         request_counter: AtomicU64::new(0),
+        alloc_pressure,
     });
 
     let port: u16 = std::env::var("PORT")
@@ -159,7 +269,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("[rust-server] Listening and serving HTTP on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -187,11 +296,7 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {
-            info!("[rust-server] Received Ctrl+C, starting graceful shutdown...");
-        },
-        _ = terminate => {
-            info!("[rust-server] Received SIGTERM, starting graceful shutdown...");
-        },
+        _ = ctrl_c => info!("[rust-server] Received Ctrl+C, shutting down..."),
+        _ = terminate => info!("[rust-server] Received SIGTERM, shutting down..."),
     }
 }

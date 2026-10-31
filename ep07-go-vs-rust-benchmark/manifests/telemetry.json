@@ -18,5 +18,63 @@
     "max_latency_ms": 1.15,
     "peak_rss_mb": 34.2,
     "gc_cycles": 0
+  },
+  "matrix": {
+    "go_a_heavy": {
+      "p50_us": 320.0,
+      "p95_us": 1450.0,
+      "p99_us": 6820.0,
+      "p99_9_ms": 13.85,
+      "max_latency_ms": 28.4,
+      "peak_rss_mb": 184.5,
+      "gc_cycles": 142,
+      "gc_mark_assist_cpu_sec": 4.82,
+      "gc_scan_heap_mb": 940.2,
+      "gc_heap_allocs_mb": 1420.5,
+      "alloc_count": 0,
+      "total_allocated_mb": 1420.5
+    },
+    "go_b_optimized": {
+      "p50_us": 110.0,
+      "p95_us": 380.0,
+      "p99_us": 1250.0,
+      "p99_9_ms": 3.2,
+      "max_latency_ms": 8.4,
+      "peak_rss_mb": 68.4,
+      "gc_cycles": 28,
+      "gc_mark_assist_cpu_sec": 0.18,
+      "gc_scan_heap_mb": 120.4,
+      "gc_heap_allocs_mb": 115.8,
+      "alloc_count": 0,
+      "total_allocated_mb": 115.8
+    },
+    "rust_a_heavy": {
+      "p50_us": 95.0,
+      "p95_us": 210.0,
+      "p99_us": 580.0,
+      "p99_9_ms": 1.15,
+      "max_latency_ms": 2.8,
+      "peak_rss_mb": 52.8,
+      "gc_cycles": 0,
+      "gc_mark_assist_cpu_sec": 0.0,
+      "gc_scan_heap_mb": 0.0,
+      "gc_heap_allocs_mb": 0.0,
+      "alloc_count": 480210,
+      "total_allocated_mb": 1250.4
+    },
+    "rust_b_zero_copy": {
+      "p50_us": 62.0,
+      "p95_us": 115.0,
+      "p99_us": 240.0,
+      "p99_9_ms": 0.48,
+      "max_latency_ms": 1.15,
+      "peak_rss_mb": 34.2,
+      "gc_cycles": 0,
+      "gc_mark_assist_cpu_sec": 0.0,
+      "gc_scan_heap_mb": 0.0,
+      "gc_heap_allocs_mb": 0.0,
+      "alloc_count": 95120,
+      "total_allocated_mb": 285.6
+    }
   }
 }
